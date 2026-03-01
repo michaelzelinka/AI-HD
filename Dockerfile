@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 ENV CLASSIFIER_SCRIPT=classify6.py
 
 COPY app.py .
-COPY classify6.py ./  # pokud máš hd_classify6.py, uprav řádek
+COPY hd_classify6.py ./  # pokud máš hd_classify6.py, uprav řádek
 
 # Render očekává, že server poběží na portu $PORT
 ENV PORT=8000
