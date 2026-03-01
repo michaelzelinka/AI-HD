@@ -24,7 +24,6 @@ import sys
 import uuid
 import shutil
 import pathlib
-import mimetypes
 import subprocess
 from typing import Optional, Tuple, List
 
@@ -133,8 +132,9 @@ def build_classifier_cmd(
         sys.executable, script,
         "--input", in_path,
         "--output", out_path,
-        "--subject_col", subject_col,
-        "--desc_col", desc_col,
+        # POZOR: správné argumenty se SPOJOVNÍKEM, aby seděly s argparse skriptu
+        "--subject-col", subject_col,
+        "--desc-col", desc_col,
         "--rpm", rpm,
         "--provider", ai_provider,
         "--model", ai_model,
@@ -284,7 +284,6 @@ def generate_from_url(
     require_openai_key_present()
 
     # Stáhnout do /tmp, odhadnout příponu
-    # (1) HEAD/GET kvůli Content-Type, (2) GET obsahu
     try:
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req) as resp:
