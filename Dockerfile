@@ -10,7 +10,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Pokud je tvůj klasifikátor pojmenovaný classify6.py, stačí env CLASSIFIER_SCRIPT
-ENV CLASSIFIER_SCRIPT=classify6.py
+ENV CLASSIFIER_SCRIPT=hd_classify6.py
 
 COPY app.py .
 COPY hd_classify6.py ./  # pokud máš hd_classify6.py, uprav řádek
