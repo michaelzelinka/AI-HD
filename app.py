@@ -1,4 +1,8 @@
-# app.py
+# volitelně: nová větev
+git checkout -b fix-app-file
+
+# Přepiš soubor app.py obsahem níže
+cat > app.py << 'PY'
 import os
 import uuid
 import subprocess
@@ -173,3 +177,7 @@ async def generate_upload(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="classified.xlsx"
     )
+PY
+
+# pro jistotu ukaž prvních 5 řádků – musí začínat "import os"
+sed -n '1,5p' app.py
