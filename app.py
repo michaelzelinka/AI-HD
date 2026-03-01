@@ -1,190 +1,355 @@
 # app.py
+# FastAPI backend pro AI Helpdesk klasifikaci (Render-friendly)
+# Endpoints:
+#   GET  /           -> {"status":"ok","service":"ai-hd"}
+#   HEAD /           -> 200 (umlčení 405 při Render HEAD probe)
+#   GET  /healthz    -> {"status":"ok"} (wake-up)
+#   POST /generate-upload -> přijme CSV/XLSX (multipart), vrátí XLSX
+#   GET  /generate   -> stáhne vstup ze vzdálené URL (CSV/XLSX), vrátí XLSX
+#
+# ENV proměnné (minimálně):
+#   API_KEY nebo RENDER_SECRET  - očekáváno v hlavičce X-API-Key
+#   OPENAI_API_KEY              - pro LLM volání ve skriptu
+#   AI_PROVIDER (default "openai"), AI_MODEL (default "gpt-4o-mini"), RPM (default "40")
+#   SUBJECT_COL (default "Problém"), DESC_COL (default "Popis problému")
+#   CLASSIFIER_SCRIPT (default "hd_classify6.py")
+#
+# Na Renderu spouštěj uvicorn shell formou:
+#   CMD uvicorn app:app --host 0.0.0.0 --port $PORT
+
+from __future__ import annotations
+
 import os
+import sys
 import uuid
+import shutil
+import pathlib
+import mimetypes
 import subprocess
-import requests
-from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, List
 
 from fastapi import (
-    FastAPI, HTTPException, UploadFile, File, Form,
-    Header, Query, BackgroundTasks
+    FastAPI, File, UploadFile, Form, Header, HTTPException, BackgroundTasks, Response, Query
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
-app = FastAPI(title="AI Report Generator (FastAPI)")
+# ---------------------------------------------------------
+# Konfigurace aplikace
+# ---------------------------------------------------------
 
-# --- ENV config ---
-API_KEY = os.getenv("API_KEY", "CHANGE_ME")
-AI_PROVIDER = os.getenv("AI_PROVIDER", "openai")  # nebo "azure"
-AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
-SUBJECT_COL = os.getenv("SUBJECT_COL", "Problém")
-DESC_COL = os.getenv("DESC_COL", "Popis problému")
-RPM = os.getenv("RPM", "40")
-DEFAULT_SRC = os.getenv("DEFAULT_SRC")            # volitelné: fallback URL pro GET /generate
-CLASSIFIER_SCRIPT = os.getenv("CLASSIFIER_SCRIPT")  # např. "hd_classify6.py" nebo "classify6.py"
+app = FastAPI(title="AI Helpdesk API", version="1.0.0")
+
+ALLOWED_EXT = {".csv", ".xlsx"}
 
 
-# ---------- Helpers ----------
-def pick_classifier_script() -> str:
-    """Vybere název skriptu klasifikátoru."""
-    if CLASSIFIER_SCRIPT and Path(CLASSIFIER_SCRIPT).exists():
-        return CLASSIFIER_SCRIPT
-    if Path("hd_classify6.py").exists():
-        return "hd_classify6.py"
-    if Path("classify6.py").exists():
-        return "classify6.py"
-    raise HTTPException(status_code=500, detail="Classifier script not found (hd_classify6.py / classify6.py).")
+# ---------------------------------------------------------
+# Pomocné funkce
+# ---------------------------------------------------------
+
+def temp_path(suffix: str) -> str:
+    """Vytvoří jedinečnou cestu v /tmp."""
+    return f"/tmp/{uuid.uuid4().hex}{suffix}"
 
 
-def build_cmd(in_file: str, out_file: str, story: bool, model: Optional[str], rpm: Optional[str]) -> list:
-    """Sestaví příkaz pro spuštění klasifikátoru."""
-    script = pick_classifier_script()
+def normalize_bool(v: Optional[str | int | bool]) -> bool:
+    """Normalizace truthy hodnot z form-data/query (1, true, yes)."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return v != 0
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+def ensure_xlsx_or_csv(filename: str) -> None:
+    """Povolí jen .csv nebo .xlsx na základě přípony."""
+    ext = pathlib.Path(filename).suffix.lower()
+    if ext not in ALLOWED_EXT:
+        allowed = ", ".join(sorted(ALLOWED_EXT))
+        raise HTTPException(status_code=400, detail=f"Unsupported file type '{ext}'. Allowed: {allowed}")
+
+
+def infer_ext_from_headers(url: str, content_type: Optional[str]) -> str:
+    """
+    Zjistí příponu podle URL nebo Content-Type.
+    Preferuje příponu z URL; když chybí, mapuje Content-Type na .csv/.xlsx.
+    """
+    path = pathlib.PurePosixPath(url.split("?", 1)[0])
+    ext = path.suffix.lower()
+    if ext in ALLOWED_EXT:
+        return ext
+    # Mapování podle MIME
+    if content_type:
+        ct = content_type.split(";")[0].strip().lower()
+        if ct in {"text/csv", "application/csv"}:
+            return ".csv"
+        if ct in {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
+        }:
+            return ".xlsx"
+    # Fallback – raději zakážeme než tipovat špatně
+    return ""
+
+
+def get_api_key_from_request(x_api_key: Optional[str]) -> str:
+    """
+    Ověří X-API-Key proti API_KEY/RENDER_SECRET v ENV.
+    Vrací platný klíč, jinak 401/500.
+    """
+    env_key = os.getenv("API_KEY") or os.getenv("RENDER_SECRET")
+    if not env_key:
+        raise HTTPException(status_code=500, detail="Server misconfiguration: API_KEY/RENDER_SECRET is not set")
+    if (x_api_key or "") != env_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return env_key
+
+
+def get_default_cols() -> Tuple[str, str]:
+    """Výchozí názvy sloupců ze smysluplných ENV fallbacků."""
+    subj = os.getenv("SUBJECT_COL", "Problém")
+    desc = os.getenv("DESC_COL", "Popis problému")
+    return subj, desc
+
+
+def build_classifier_cmd(
+    in_path: str,
+    out_path: str,
+    subject_col: str,
+    desc_col: str,
+    story: bool
+) -> List[str]:
+    """
+    Poskládá příkaz pro klasifikátor (samostatný proces kvůli izolaci a sběru stdout/stderr).
+    """
+    script = os.getenv("CLASSIFIER_SCRIPT", "hd_classify6.py")
+    rpm = os.getenv("RPM", "40")
+    ai_provider = os.getenv("AI_PROVIDER", "openai")
+    ai_model = os.getenv("AI_MODEL", "gpt-4o-mini")
+
     cmd = [
-        "python3", script,
-        "--input", in_file,
-        "--output", out_file,
-        "--provider", AI_PROVIDER,
-        "--model", model or AI_MODEL,
-        "--subject-col", SUBJECT_COL,
-        "--desc-col", DESC_COL,
-        "--rpm", rpm or RPM
+        sys.executable, script,
+        "--input", in_path,
+        "--output", out_path,
+        "--subject_col", subject_col,
+        "--desc_col", desc_col,
+        "--rpm", rpm,
+        "--provider", ai_provider,
+        "--model", ai_model,
     ]
     if story:
         cmd.append("--story")
     return cmd
 
 
-def ensure_xlsx_or_csv(filename: str):
-    lower = (filename or "").lower()
-    if lower.endswith(".xlsx") or lower.endswith(".csv"):
-        return
-    raise HTTPException(status_code=400, detail="Soubor musí být .xlsx nebo .csv.")
+def run_cmd_capture(cmd: List[str], extra_env: Optional[dict] = None) -> tuple[int, str, str]:
+    """Spustí příkaz a vrátí (returncode, stdout, stderr)."""
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    out, err = proc.communicate()
+    return proc.returncode, out, err
 
 
-def download_to_tmp(src_url: str) -> str:
-    """Stáhne soubor z URL do /tmp a vrátí cestu k dočasnému XLSX."""
-    in_file = f"/tmp/{uuid.uuid4()}.xlsx"
-    try:
-        with requests.get(src_url, stream=True, timeout=120) as r:
-            r.raise_for_status()
-            with open(in_file, "wb") as f:
-                for chunk in r.iter_content(1024 * 512):
-                    if chunk:
-                        f.write(chunk)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Download error: {e}")
-    return in_file
+def bg_cleanup(paths: List[str]) -> None:
+    """Smaže soubory/složky; chyby ignoruje."""
+    for p in paths:
+        try:
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                if os.path.exists(p):
+                    os.remove(p)
+        except Exception:
+            pass
 
 
-# ---------- Endpoints ----------
+def require_openai_key_present() -> None:
+    """Včasná kontrola, aby uživatel dostal srozumitelnou chybu, když chybí LLM klíč."""
+    if not os.getenv("OPENAI_API_KEY", "").strip():
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfiguration: OPENAI_API_KEY is not set"
+        )
+
+
+# ---------------------------------------------------------
+# Routes
+# ---------------------------------------------------------
+
 @app.get("/")
 def root():
-    return {"status": "running"}
+    return {"status": "ok", "service": "ai-hd"}
+
+
+@app.head("/")
+def root_head():
+    # Umlčí 405 "Method Not Allowed" na Renderu při HEAD probe.
+    return Response(status_code=200)
+
 
 @app.get("/healthz")
 def healthz():
+    # Jednoduchý wake-up endpoint (doporučeno volat před uploadem).
     return {"status": "ok"}
-
-
-@app.get("/generate")
-def generate_get(
-    background_tasks: BackgroundTasks,
-    x_api_key: str = Header(default=""),
-    key: Optional[str] = Query(default=None),
-    src: Optional[str] = Query(default=None, description="URL na vstupní .xlsx"),
-    story: bool = Query(default=True),
-    model: Optional[str] = Query(default=None),
-    rpm: Optional[str] = Query(default=None)
-):
-    """
-    GET /generate?src=...&story=1
-    - stáhne XLSX z URL (src nebo DEFAULT_SRC),
-    - spustí klasifikátor,
-    - vrátí hotový XLSX.
-    """
-    # --- Auth ---
-    provided_key = x_api_key or (key or "")
-    if provided_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    real_src = src or DEFAULT_SRC
-    if not real_src:
-        raise HTTPException(status_code=400, detail="Chybí 'src' a není nastaven DEFAULT_SRC.")
-
-    # --- stáhnout do /tmp ---
-    in_file = download_to_tmp(real_src)
-    out_file = f"/tmp/{uuid.uuid4()}.xlsx"
-
-    # --- spustit klasifikátor ---
-    cmd = build_cmd(in_file, out_file, story=story, model=model, rpm=rpm)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-
-    if proc.returncode != 0:
-        # úklid
-        background_tasks.add_task(Path(in_file).unlink, missing_ok=True)
-        background_tasks.add_task(Path(out_file).unlink, missing_ok=True)
-        raise HTTPException(status_code=500, detail={"stdout": proc.stdout, "stderr": proc.stderr})
-
-    # --- po odeslání odpovědi ukliď ---
-    background_tasks.add_task(Path(in_file).unlink, missing_ok=True)
-    background_tasks.add_task(Path(out_file).unlink, missing_ok=True)
-
-    return FileResponse(
-        out_file,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename="classified.xlsx"
-    )
 
 
 @app.post("/generate-upload")
 async def generate_upload(
     background_tasks: BackgroundTasks,
-    x_api_key: str = Header(default=""),
-    key: Optional[str] = Form(default=None),
-    story: bool = Form(True),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    story: Optional[int | str | bool] = Form(default=0),
+    subject_col: Optional[str] = Form(default=None),
+    desc_col: Optional[str] = Form(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+):
+    # Auth + základní validace prostředí
+    get_api_key_from_request(x_api_key)
+    require_openai_key_present()
+
+    # Validace přípony
+    ensure_xlsx_or_csv(file.filename or "")
+
+    # Uložení vstupu do /tmp
+    in_suffix = pathlib.Path(file.filename).suffix.lower()
+    in_path = temp_path(in_suffix)
+    out_path = temp_path(".xlsx")
+
+    with open(in_path, "wb") as f:
+        f.write(await file.read())
+
+    # Sloupce (defaulty z ENV => přepíše form-data)
+    default_subj, default_desc = get_default_cols()
+    subj = (subject_col or default_subj).strip()
+    desc = (desc_col or default_desc).strip()
+
+    # Sestavení & spuštění skriptu
+    cmd = build_classifier_cmd(
+        in_path=in_path,
+        out_path=out_path,
+        subject_col=subj,
+        desc_col=desc,
+        story=normalize_bool(story),
+    )
+
+    rc, stdout, stderr = run_cmd_capture(cmd, extra_env={
+        "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
+    })
+
+    if rc != 0 or not os.path.exists(out_path):
+        # Vrátit detailní debug JSON (omezená délka logu kvůli velikosti odpovědi)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "classification_failed",
+                "returncode": rc,
+                "stdout": (stdout or "")[-8000:],
+                "stderr": (stderr or "")[-8000:],
+                "cmd": cmd,
+            },
+        )
+
+    # Úklid dočasných dat po odeslání
+    background_tasks.add_task(bg_cleanup, [in_path, out_path])
+
+    # Stream XLSX zpět
+    return FileResponse(
+        out_path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="classified.xlsx",
+        background=background_tasks,
+    )
+
+
+@app.get("/generate")
+def generate_from_url(
+    background_tasks: BackgroundTasks,
+    url: str = Query(..., description="URL na CSV/XLSX soubor"),
+    story: Optional[int | str | bool] = Query(default=0),
+    subject_col: Optional[str] = Query(default=None),
+    desc_col: Optional[str] = Query(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ):
     """
-    POST /generate-upload (multipart/form-data)
-      fields:
-        - file: .xlsx (binary)
-        - story: 1/0 (bool)
-        - key: (volitelné – fallback; preferujeme X-API-Key v hlavičce)
+    Stáhne vzdálený CSV/XLSX a zpracuje ho. Nepotřebuje 'requests' – používá stdlib urllib.
+    Vhodné pro jednoduché scénáře nebo rychlé testy.
     """
-    # --- Auth ---
-    provided_key = x_api_key or (key or "")
-    if provided_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    import urllib.request
 
-    ensure_xlsx(file.filename or "")
+    # Auth + kontrola LLM klíče
+    get_api_key_from_request(x_api_key)
+    require_openai_key_present()
 
-    # --- uložení nahraného souboru ---
-    in_file = f"/tmp/{uuid.uuid4()}.xlsx"
-    out_file = f"/tmp/{uuid.uuid4()}.xlsx"
+    # Stáhnout do /tmp, odhadnout příponu
+    # (1) HEAD/GET kvůli Content-Type, (2) GET obsahu
     try:
-        data = await file.read()
-        with open(in_file, "wb") as f:
-            f.write(data)
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req) as resp:
+            content_type = resp.headers.get("Content-Type")
+            ext = infer_ext_from_headers(url, content_type)
+            if ext not in ALLOWED_EXT:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot infer file type from URL/headers. Allowed: {', '.join(sorted(ALLOWED_EXT))}"
+                )
+            in_path = temp_path(ext)
+            out_path = temp_path(".xlsx")
+            with open(in_path, "wb") as f:
+                f.write(resp.read())
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Upload error: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to download input: {e}")
 
-    # --- spustit klasifikátor ---
-    cmd = build_cmd(in_file, out_file, story=story, model=None, rpm=None)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # Sloupce
+    default_subj, default_desc = get_default_cols()
+    subj = (subject_col or default_subj).strip()
+    desc = (desc_col or default_desc).strip()
 
-    if proc.returncode != 0:
-        # úklid
-        background_tasks.add_task(Path(in_file).unlink, missing_ok=True)
-        background_tasks.add_task(Path(out_file).unlink, missing_ok=True)
-        raise HTTPException(status_code=500, detail={"stdout": proc.stdout, "stderr": proc.stderr})
+    # Spuštění
+    cmd = build_classifier_cmd(
+        in_path=in_path,
+        out_path=out_path,
+        subject_col=subj,
+        desc_col=desc,
+        story=normalize_bool(story),
+    )
+    rc, stdout, stderr = run_cmd_capture(cmd, extra_env={
+        "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
+    })
 
-    # --- po odeslání odpovědi ukliď ---
-    background_tasks.add_task(Path(in_file).unlink, missing_ok=True)
-    background_tasks.add_task(Path(out_file).unlink, missing_ok=True)
+    if rc != 0 or not os.path.exists(out_path):
+        # Úklid vstupu (výstup nejspíš nevznikl)
+        bg_cleanup([in_path, out_path])
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "classification_failed",
+                "returncode": rc,
+                "stdout": (stdout or "")[-8000:],
+                "stderr": (stderr or "")[-8000:],
+                "cmd": cmd,
+            },
+        )
+
+    # Úklid po odeslání
+    background_tasks.add_task(bg_cleanup, [in_path, out_path])
 
     return FileResponse(
-        out_file,
+        out_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename="classified.xlsx"
+        filename="classified.xlsx",
+        background=background_tasks,
     )
+
+
+# ---------------------------------------------------------
+# Lokální spuštění (volitelné)
+# ---------------------------------------------------------
+if __name__ == "__main__":
+    # pro lokální běh: python app.py
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
