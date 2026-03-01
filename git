@@ -1,1 +1,3 @@
-git add Dockerfilegit commit -m "Fix Dockerfile: remove inline comment, correct classifier file"git push
+git add Dockerfile requirements.txt .dockerignore
+git commit -m "Render: add requirements, fix Dockerfile (uvicorn --port \$PORT), copy classifier"
+git push -u origin render-fix
