@@ -1,1 +1,1 @@
-git add Dockerfile requirements.txt .dockerignoregit commit -m "Add Dockerfile for Render + requirements"git push
+git add Dockerfilegit commit -m "Fix Dockerfile: remove inline comment, correct classifier file"git push
