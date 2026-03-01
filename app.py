@@ -1,8 +1,4 @@
-# volitelně: nová větev
-git checkout -b fix-app-file
-
-# Přepiš soubor app.py obsahem níže
-cat > app.py << 'PY'
+# app.py
 import os
 import uuid
 import subprocess
@@ -100,7 +96,13 @@ def generate_get(
     model: Optional[str] = Query(default=None),
     rpm: Optional[str] = Query(default=None)
 ):
-    """GET /generate?src=...&story=1 – stáhne XLSX z URL, spustí klasifikátor a vrátí hotový XLSX."""
+    """
+    GET /generate?src=...&story=1
+    - stáhne XLSX z URL (src nebo DEFAULT_SRC),
+    - spustí klasifikátor,
+    - vrátí hotový XLSX.
+    """
+    # --- Auth ---
     provided_key = x_api_key or (key or "")
     if provided_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -109,18 +111,21 @@ def generate_get(
     if not real_src:
         raise HTTPException(status_code=400, detail="Chybí 'src' a není nastaven DEFAULT_SRC.")
 
+    # --- stáhnout do /tmp ---
     in_file = download_to_tmp(real_src)
     out_file = f"/tmp/{uuid.uuid4()}.xlsx"
 
+    # --- spustit klasifikátor ---
     cmd = build_cmd(in_file, out_file, story=story, model=model, rpm=rpm)
     proc = subprocess.run(cmd, capture_output=True, text=True)
 
     if proc.returncode != 0:
+        # úklid
         background_tasks.add_task(Path(in_file).unlink, missing_ok=True)
         background_tasks.add_task(Path(out_file).unlink, missing_ok=True)
         raise HTTPException(status_code=500, detail={"stdout": proc.stdout, "stderr": proc.stderr})
 
-    # úklid po odeslání
+    # --- po odeslání odpovědi ukliď ---
     background_tasks.add_task(Path(in_file).unlink, missing_ok=True)
     background_tasks.add_task(Path(out_file).unlink, missing_ok=True)
 
@@ -146,12 +151,14 @@ async def generate_upload(
         - story: 1/0 (bool)
         - key: (volitelné – fallback; preferujeme X-API-Key v hlavičce)
     """
+    # --- Auth ---
     provided_key = x_api_key or (key or "")
     if provided_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     ensure_xlsx(file.filename or "")
 
+    # --- uložení nahraného souboru ---
     in_file = f"/tmp/{uuid.uuid4()}.xlsx"
     out_file = f"/tmp/{uuid.uuid4()}.xlsx"
     try:
@@ -161,14 +168,17 @@ async def generate_upload(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Upload error: {e}")
 
+    # --- spustit klasifikátor ---
     cmd = build_cmd(in_file, out_file, story=story, model=None, rpm=None)
     proc = subprocess.run(cmd, capture_output=True, text=True)
 
     if proc.returncode != 0:
+        # úklid
         background_tasks.add_task(Path(in_file).unlink, missing_ok=True)
         background_tasks.add_task(Path(out_file).unlink, missing_ok=True)
         raise HTTPException(status_code=500, detail={"stdout": proc.stdout, "stderr": proc.stderr})
 
+    # --- po odeslání odpovědi ukliď ---
     background_tasks.add_task(Path(in_file).unlink, missing_ok=True)
     background_tasks.add_task(Path(out_file).unlink, missing_ok=True)
 
@@ -177,7 +187,3 @@ async def generate_upload(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="classified.xlsx"
     )
-PY
-
-# pro jistotu ukaž prvních 5 řádků – musí začínat "import os"
-sed -n '1,5p' app.py
