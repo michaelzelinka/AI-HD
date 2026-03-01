@@ -55,10 +55,11 @@ def build_cmd(in_file: str, out_file: str, story: bool, model: Optional[str], rp
     return cmd
 
 
-def ensure_xlsx(filename: str):
-    """Povolit jen .xlsx (openpyxl neumí .xls)."""
-    if not filename.lower().endswith(".xlsx"):
-        raise HTTPException(status_code=400, detail="Očekáván Excel .xlsx.")
+def ensure_xlsx_or_csv(filename: str):
+    lower = (filename or "").lower()
+    if lower.endswith(".xlsx") or lower.endswith(".csv"):
+        return
+    raise HTTPException(status_code=400, detail="Soubor musí být .xlsx nebo .csv.")
 
 
 def download_to_tmp(src_url: str) -> str:
