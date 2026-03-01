@@ -1,0 +1,1 @@
+git add Dockerfile requirements.txt .dockerignoregit commit -m "Add Dockerfile for Render + requirements"git push
