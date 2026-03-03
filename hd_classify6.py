@@ -280,7 +280,6 @@ Položky (vzorek):
 """
         payload = {
             "model": self.model,
-            "temperature": 0,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_prompt}
