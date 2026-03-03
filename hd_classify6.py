@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """
-hd_classify6.py – RYCHLÁ (BATCH) AI klasifikace + storytelling (CSV/XLSX)
-
 Hlavní myšlenka:
  1) RULE-FIRST: nejdřív lokální pravidla (aliasy/keywords). Pokud confidence >= threshold,
     řádek je hotový bez LLM.
@@ -38,9 +36,8 @@ import pandas as pd
 import requests
 
 
-# ==========================
-# 1) KATEGORIE / HEURISTIKY
-# ==========================
+
+# 1) KATEGORIE
 
 CATEGORIES = [
     "Instalace / aktualizace software",
@@ -115,7 +112,7 @@ def normalize_text(s: str) -> str:
 
 
 def normalize_for_match(s: str) -> str:
-    """Lower + odstranění diakritiky + kompaktní mezery (pro robustní porovnávání)."""
+    """Lower + odstranění diakritiky + kompaktní mezery"""
     s = normalize_text(s).lower()
     s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
     s = re.sub(r"\s+", " ", s)
@@ -158,9 +155,8 @@ def validate_category(cat: Optional[str]) -> str:
     return "Ostatní"
 
 
-# ==========================
-# 2) LLM klient (OpenAI / Azure)
-# ==========================
+
+# 2) LLM klient (OpenAI)
 
 class LLMClient:
     def __init__(self, provider: str, model: str, rpm: int):
@@ -254,7 +250,7 @@ Vrať POUZE JSON:
             js["confidence"] = 0
         return js
 
-    # --- BATCH klasifikace (doporučeno) ---
+    # --- BATCH klasifikace ---
     def classify_batch(self, items: List[dict], lang: str = "cs") -> List[dict]:
         """
         items: [{ "id": "...", "subject": "...", "desc": "..." }, ...]
@@ -346,9 +342,7 @@ Napiš přehledné shrnutí (max 10 vět), ideálně po odstavcích:
         return data["choices"][0]["message"]["content"].strip()
 
 
-# ==========================
 # 3) I/O, mapování sloupců
-# ==========================
 
 def load_dataframe(path: str) -> pd.DataFrame:
     p = path.lower()
@@ -380,9 +374,8 @@ def find_column(df: pd.DataFrame, wanted: str, aliases: Optional[List[str]] = No
     return None
 
 
-# ==========================
+
 # 4) Argumenty a hlavní běh
-# ==========================
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -496,7 +489,7 @@ def main():
                 out_method[i] = method
 
         else:
-            # BATCH – doporučeno
+            # BATCH 
             bs = max(1, int(args.batch_size))
             for start in range(0, len(to_llm), bs):
                 chunk_idx = to_llm[start:start + bs]
@@ -527,6 +520,7 @@ def main():
     # --- Uložení ---
     out_lower = args.output.lower()
     if out_lower.endswith(".xlsx"):
+  
         # Preferuj xlsxwriter (lepší formátování), fallback openpyxl
         try:
             with pd.ExcelWriter(args.output, engine="xlsxwriter") as writer:
