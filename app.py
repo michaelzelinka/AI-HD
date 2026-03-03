@@ -17,24 +17,28 @@ def root():
 async def generate(
     file: UploadFile = File(...),
     story: int = Form(0),
+    # ➕ NOVÉ: volitelná mapování hlaviček
+    subject_col: str = Form("Problém"),
+    desc_col: str = Form("Popis problému"),
 ):
     job_id = str(uuid.uuid4())
     input_path = f"/tmp/{job_id}_{file.filename}"
     output_path = os.path.join(OUTPUT_DIR, f"{job_id}.xlsx")
 
-    # 1) Ulož vstup
     with open(input_path, "wb") as f:
         f.write(await file.read())
 
-    # 2) Spusť klasifikaci (jen XLSX výstup)
     cmd = [
         "python3", "hd_classify6.py",
         "--input", input_path,
         "--output", output_path,
         "--provider", "openai",
         "--model", "gpt-4o-mini",
-        "--batch-size", "300",   # rychlejší batch
-        "--rpm", "120"           # vyšší limit
+        "--batch-size", "300",
+        "--rpm", "120",
+        # ➕ NOVÉ: předáme mapování dál do skriptu
+        "--subject-col", subject_col,
+        "--desc-col", desc_col,
     ]
     if story == 1:
         cmd.append("--story")
@@ -46,7 +50,6 @@ async def generate(
             content={"error": "Classification failed", "stderr": run.stderr, "stdout": run.stdout}
         )
 
-    # 3) Vrať job_id
     return {"job_id": job_id}
 
 @app.get("/download/{job_id}")
