@@ -330,7 +330,6 @@ Napiš přehledné shrnutí (max 10 vět), ideálně po odstavcích:
 """
         payload = {
             "model": self.model,
-            "temperature": 0.2,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_prompt}
