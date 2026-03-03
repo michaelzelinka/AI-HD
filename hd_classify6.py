@@ -439,7 +439,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--desc-col", "--desc_col", dest="desc_col",
                    default=os.getenv("DESC_COL", "Popis problému"))
     p.add_argument("--provider", choices=["openai", "azure"], required=True)
-    p.add_argument("--model", default="gpt-4o-mini")
+    p.add_argument("--model", default="gpt-5-mini")
     p.add_argument("--rpm", type=int, default=60)
     p.add_argument("--max-rows", type=int, default=None)
     p.add_argument("--offline-only", action="store_true")
