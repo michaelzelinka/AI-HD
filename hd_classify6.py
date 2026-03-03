@@ -344,15 +344,67 @@ Napiš přehledné shrnutí (max 10 vět), ideálně po odstavcích:
 
 # 3) I/O, mapování sloupců
 
+# --- Robustní CSV/XLSX loader s autodetekcí oddělovače ---
+import csv
+import io
+
 def load_dataframe(path: str) -> pd.DataFrame:
     p = path.lower()
+
+    # Excel (nejjednodušší varianta)
     if p.endswith((".xlsx", ".xls")):
-        return pd.read_excel(path, engine="openpyxl")
-    # CSV – preferuj utf-8-sig, fallback čisté utf-8
+        df = pd.read_excel(path, engine="openpyxl")
+        return df.fillna("")
+
+    # CSV – načti bezpečně, sjednoť encoding, čisti CRLF
+    with open(path, "rb") as fh:
+        raw = fh.read()
+
     try:
-        return pd.read_csv(path, encoding="utf-8-sig")
+        txt = raw.decode("utf-8-sig", errors="replace")
     except Exception:
-        return pd.read_csv(path, encoding="utf-8")
+        txt = raw.decode("utf-8", errors="replace")
+
+    txt = txt.replace("\r\n", "\n").replace("\r", "\n")
+
+    # 1) Nejlepší varianta – autodetekce oddělovače
+    try:
+        df = pd.read_csv(
+            io.StringIO(txt),
+            engine="python",
+            sep=None,              # autodetekce: , ; \t | 
+            on_bad_lines="skip",
+            dtype=str
+        )
+        if df.shape[1] >= 2:
+            return df.fillna("")
+    except Exception:
+        pass
+
+    # 2) Ruční fallbacky pro CSV s jediným sloupcem
+    for sep_try in [",", ";", "\t", "|"]:
+        try:
+            df = pd.read_csv(
+                io.StringIO(txt),
+                engine="python",
+                sep=sep_try,
+                quoting=csv.QUOTE_NONE,
+                on_bad_lines="skip",
+                dtype=str
+            )
+            if df.shape[1] >= 2:
+                return df.fillna("")
+        except Exception:
+            continue
+
+    # 3) Nouzový poslední pokus
+    df = pd.read_csv(
+        io.StringIO(txt),
+        engine="python",
+        on_bad_lines="skip",
+        dtype=str
+    )
+    return df.fillna("")
 
 
 def normalize_name(s: str) -> str:
