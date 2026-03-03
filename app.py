@@ -33,9 +33,9 @@ async def generate(
         "--input", input_path,
         "--output", output_path,
         "--provider", "openai",
-        "--model", "gpt-4o-mini",
-        "--batch-size", "300",
-        "--rpm", "120",
+        "--model", "gpt-5-mini",
+        "--batch-size", "50",
+        "--rpm", "100",
         # ➕ NOVÉ: předáme mapování dál do skriptu
         "--subject-col", subject_col,
         "--desc-col", desc_col,
