@@ -16,7 +16,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # --- ENV ---
 AI_PROVIDER = os.getenv("AI_PROVIDER", "openai")
-AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
+AI_MODEL = os.getenv("AI_MODEL", "gpt-5-mini")
 RPM = os.getenv("RPM", "40")
 BATCH_SIZE = os.getenv("BATCH_SIZE", "50")
 DEFAULT_SUBJECT = os.getenv("SUBJECT_COL", "Problem")
