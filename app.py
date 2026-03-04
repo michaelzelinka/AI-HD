@@ -51,24 +51,25 @@ def root():
 
 # --- Vykonavací funkce: spustí klasifikátor a vše zaloguje ---
 def run_job(cmd: list, log_path: str, rc_path: str):
-    """
-    Spustí klasifikační proces synchronně (v background tasku), napíše stdout/stderr do logu
-    a uloží návratový kód do .rc souboru.
-    """
     with open(log_path, "a", buffering=1) as lf:
         lf.write("== PROCESS START ==\n")
-        lf.write(f"PYTHON: {sys.executable}\n")
         lf.write(f"CMD: {' '.join(cmd)}\n\n")
         try:
-            proc = subprocess.run(cmd, stdout=lf, stderr=lf, text=True)
+            proc = subprocess.run(
+                cmd,
+                stdout=lf,
+                stderr=lf,
+                text=True,
+                cwd="/app"     # <<< 🔥 DŮLEŽITÉ: spusť script z /app
+            )
             rc = proc.returncode
         except Exception as e:
-            lf.write(f"\n[ERROR] Subprocess failed: {e}\n")
+            lf.write(f"[ERROR] {e}\n")
             rc = 1
         lf.write(f"\n== PROCESS END (rc={rc}) ==\n")
-    try:
-        with open(rc_path, "w") as rcf:
-            rcf.write(str(rc))
+
+    with open(rc_path, "w") as rcf:
+        rcf.write(str(rc))
     except Exception:
         pass
 
