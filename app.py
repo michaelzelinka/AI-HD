@@ -77,8 +77,7 @@ def run_job_sync(cmd: list, log_path: str, rc_path: str):
         with open(rc_path, "w") as f:
             f.write(str(rc))
 
-    except Exception as e:
-        # Fatal logging error
+    except Exception:
         with open(rc_path, "w") as f:
             f.write("1")
 
@@ -123,7 +122,7 @@ async def generate(
     job_id = str(uuid.uuid4())
     input_path = f"/tmp/{job_id}_{file.filename}"
     output_path = os.path.join(OUTPUT_DIR, f"{job_id}.xlsx")
-    log_path = os.path.join(OUTPUT_DIR, f"{job_id}.log")
+    log_path = os.path.join(OUTPUT_DIR, f"{job_id}.log"})
     rc_path = os.path.join(OUTPUT_DIR, f"{job_id}.rc")
 
     # Save input
@@ -131,7 +130,6 @@ async def generate(
     with open(input_path, "wb") as f:
         f.write(body)
 
-    # Resolve classifier path
     classifier = resolve_classifier_script()
 
     with open(log_path, "w") as lf:
@@ -145,7 +143,7 @@ async def generate(
             f.write("1")
         return {"job_id": job_id}
 
-    # Build CMD (ABSOLUTE path!)
+    # Build CMD
     cmd = [
         sys.executable,
         classifier,
@@ -164,7 +162,6 @@ async def generate(
     if FORCE_OFFLINE or not OPENAI_API_KEY:
         cmd.append("--offline-only")
 
-    # Start background job in threadpool
     asyncio.create_task(run_job(cmd, log_path, rc_path))
 
     return {"job_id": job_id}
