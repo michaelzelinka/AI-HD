@@ -1,3 +1,4 @@
+# app.py (výňatek)
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 import uuid
@@ -5,19 +6,13 @@ import os
 import subprocess
 
 app = FastAPI()
-
 OUTPUT_DIR = "/tmp/hd_outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-@app.get("/")
-def root():
-    return {"status": "OK", "message": "AI-HD API is running"}
 
 @app.post("/generate")
 async def generate(
     file: UploadFile = File(...),
     story: int = Form(0),
-    # ➕ NOVÉ: volitelná mapování hlaviček
     subject_col: str = Form("Problém"),
     desc_col: str = Form("Popis problému"),
 ):
@@ -25,9 +20,11 @@ async def generate(
     input_path = f"/tmp/{job_id}_{file.filename}"
     output_path = os.path.join(OUTPUT_DIR, f"{job_id}.xlsx")
 
+    # uložíme vstup
     with open(input_path, "wb") as f:
         f.write(await file.read())
 
+    # připravíme příkaz
     cmd = [
         "python3", "hd_classify6.py",
         "--input", input_path,
@@ -36,12 +33,18 @@ async def generate(
         "--model", "gpt-5-mini",
         "--batch-size", "50",
         "--rpm", "100",
-        # ➕ NOVÉ: předáme mapování dál do skriptu
         "--subject-col", subject_col,
         "--desc-col", desc_col,
     ]
     if story == 1:
         cmd.append("--story")
+
+    # 🔸 spustíme na pozadí, NEČEKÁME
+    subprocess.Popen(cmd)
+
+    # 🔸 hned vracíme job_id
+    return {"job_id": job_id}
+
 
     run = subprocess.run(cmd, capture_output=True, text=True)
     if run.returncode != 0:
