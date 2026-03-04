@@ -3,7 +3,7 @@
 # ================================
 
 # 1) Base image
-FROM python:3.10-slim
+FROM python:3.10
 
 # 2) System deps (volitelné – ponechat minimální stopu)
 #    Pokud tvůj klasifikátor vyžaduje system knihovny (např. locales, libmagic atd.),
