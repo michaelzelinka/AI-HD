@@ -122,7 +122,7 @@ async def generate(
     job_id = str(uuid.uuid4())
     input_path = f"/tmp/{job_id}_{file.filename}"
     output_path = os.path.join(OUTPUT_DIR, f"{job_id}.xlsx")
-    log_path = os.path.join(OUTPUT_DIR, f"{job_id}.log"})
+    log_path = os.path.join(OUTPUT_DIR, f"{job_id}.log")
     rc_path = os.path.join(OUTPUT_DIR, f"{job_id}.rc")
 
     # Save input
