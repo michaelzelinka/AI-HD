@@ -17,8 +17,8 @@ python3 hd_classify6.py \
   --output /path/report.xlsx \
   --provider openai \
   --model gpt-5-mini \
-  --batch-size 120 \
-  --rpm 120 \
+  --batch-size 50 \
+  --rpm 50 \
   --subject-col "Problém" \
   --desc-col "Popis problému" \
   --story
