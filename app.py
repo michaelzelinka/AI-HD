@@ -75,13 +75,14 @@ def run_job(cmd: list, log_path: str, rc_path: str):
 # --- POST /generate ---
 @app.post("/generate")
 async def generate(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
     story: int = Form(0),
-    subject_col: str = Form(DEFAULT_SUBJECT),
-    desc_col: str = Form(DEFAULT_DESC),
+    subject_col: str = Form("Problem"),
+    desc_col: str = Form("Popis problemu"),
     x_api_key_header1: Optional[str] = Header(None, alias="X-API-KEY"),
     x_api_key_header2: Optional[str] = Header(None, alias="X-API_KEY"),
+):
 ):
     # (volitelné) API klíč
     expected_key = REQUIRE_API_KEY
