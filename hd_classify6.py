@@ -479,7 +479,8 @@ def main():
     df["AI_Explanation"] = out_exp
     df["AI_Method"] = out_method
 
-    # Uložení – XLSX only
+# Uložení – XLSX only (s fallbackem na openpyxl, pokud xlsxwriter není v prostředí)
+try:
     with pd.ExcelWriter(args.output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name="Data")
 
@@ -492,7 +493,24 @@ def main():
         })
         staging.to_excel(writer, index=False, sheet_name="AI_Staging")
 
-        # Storytelling (volitelně)
+        if args.story and (not args.offline_only) and (df.shape[0] > 0):
+            rows = df[[subj_real, desc_real]].to_dict(orient="records")
+            text = llm.story(rows, subj=subj_real, desc=desc_real, lang=args.lang)
+            pd.DataFrame({"Story": [text]}).to_excel(writer, index=False, sheet_name="Storytelling")
+except ModuleNotFoundError:
+    # Fallback na openpyxl
+    with pd.ExcelWriter(args.output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Data")
+
+        staging = pd.DataFrame({
+            id_label: ids,
+            "AI_Category": out_cat,
+            "AI_Confidence": out_conf,
+            "AI_Explanation": out_exp,
+            "AI_Method": out_method,
+        })
+        staging.to_excel(writer, index=False, sheet_name="AI_Staging")
+
         if args.story and (not args.offline_only) and (df.shape[0] > 0):
             rows = df[[subj_real, desc_real]].to_dict(orient="records")
             text = llm.story(rows, subj=subj_real, desc=desc_real, lang=args.lang)
