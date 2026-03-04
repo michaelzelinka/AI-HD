@@ -20,11 +20,32 @@ async def generate(
     input_path = f"/tmp/{job_id}_{file.filename}"
     output_path = os.path.join(OUTPUT_DIR, f"{job_id}.xlsx")
 
-    # uložíme vstup
-with open(input_path, "wb") as f:
+    # načtení a uložení souboru
     body = await file.read()
     print("DEBUG file size:", len(body))
-    f.write(body)
+    with open(input_path, "wb") as f:
+        f.write(body)
+
+    # příkaz pro background skript
+    cmd = [
+        "python3", "hd_classify6.py",
+        "--input", input_path,
+        "--output", output_path,
+        "--provider", "openai",
+        "--model", "gpt-5-mini",
+        "--batch-size", "50",
+        "--rpm", "100",
+        "--subject-col", subject_col,
+        "--desc-col", desc_col,
+    ]
+    if story == 1:
+        cmd.append("--story")
+
+    # NEBLOKUJÍCÍ background běh
+    subprocess.Popen(cmd)
+
+    # okamžitý návrat job_id
+    return {"job_id": job_id}
 
 
     # připravíme příkaz
