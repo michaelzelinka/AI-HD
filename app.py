@@ -21,8 +21,11 @@ async def generate(
     output_path = os.path.join(OUTPUT_DIR, f"{job_id}.xlsx")
 
     # uložíme vstup
-    with open(input_path, "wb") as f:
-        f.write(await file.read())
+with open(input_path, "wb") as f:
+    body = await file.read()
+    print("DEBUG file size:", len(body))
+    f.write(body)
+
 
     # připravíme příkaz
     cmd = [
