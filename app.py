@@ -27,21 +27,15 @@ FORCE_OFFLINE = os.getenv("OFFLINE_ONLY", "0") in ("1", "true", "yes")
 
 # --- Utility: find classifier script ---
 def resolve_classifier_script() -> str:
-    candidates: List[str] = []
-    if CLASSIFIER_SCRIPT:
-        candidates.append(CLASSIFIER_SCRIPT)
-
-    candidates += [
-        "hd_classify6.py",
-        "hd_classify6 (1).py",
+    candidates = [
         "/app/hd_classify6.py",
         "/app/hd_classify6 (1).py",
+        "hd_classify6.py",
+        "hd_classify6 (1).py",
     ]
-
     for p in candidates:
         if os.path.exists(p):
-            return p
-
+            return os.path.abspath(p)
     return ""
 
 
@@ -52,27 +46,29 @@ def root():
 
 # --- Background job runner ---
 def run_job(cmd: list, log_path: str, rc_path: str):
+    classifier_path = cmd[1]
+    workdir = os.path.dirname(classifier_path)
+
     with open(log_path, "a", buffering=1) as lf:
         lf.write("== PROCESS START ==\n")
-        lf.write(f"CMD: {' '.join(cmd)}\n\n")
+        lf.write(f"CMD: {' '.join(cmd)}\n")
+        lf.write(f"CWD: {workdir}\n\n")
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                stdout=lf,
-                stderr=lf,
-                text=True,
-                cwd="/app"
-            )
-            rc = proc.returncode
-        except Exception as e:
-            lf.write(f"[ERROR] {e}\n")
-            rc = 1
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=lf,
+            stderr=lf,
+            text=True,
+            cwd=workdir,     # DŮLEŽITÉ
+        )
+        rc = proc.returncode
+    except Exception as e:
+        lf.write(f"[ERROR] {e}\n")
+        rc = 1
 
-        lf.write(f"\n== PROCESS END (rc={rc}) ==\n")
-
-    with open(rc_path, "w") as rcf:
-        rcf.write(str(rc))
+    with open(rc_path, "w") as f:
+        f.write(str(rc))
 
 
 # --- POST /generate ---
@@ -119,7 +115,7 @@ async def generate(
 
     cmd = [
         sys.executable,
-        classifier,
+        os.path.abspath(classifier),
         "--input", input_path,
         "--output", output_path,
         "--provider", AI_PROVIDER,
@@ -137,7 +133,14 @@ async def generate(
         cmd.append("--offline-only")
 
     # run in background
-    background_tasks.add_task(run_job, cmd, log_path, rc_path)
+    
+background_tasks.add_task(
+    run_job,
+    cmd,
+    log_path,
+    rc_path,
+)
+
 
     return {"job_id": job_id}
 
