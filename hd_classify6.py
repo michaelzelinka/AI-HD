@@ -5,16 +5,16 @@ hd_classify6.py – Finální produkční verze (2026/03)
 Funkce:
 - Rule-first + Batch LLM klasifikace (minimalizace LLM volání)
 - Storytelling (CZ)
-- Robustní CSV loader (semicolon/diakritika/BOM/CRLF/multiline)
-- Výstup pouze XLSX (Data, AI_Staging, volitelně Storytelling)
+- Robustní CSV/XLSX loader (semicolon/diakritika/BOM/CRLF/multiline)
+- Výstup: XLSX (Data, AI_Staging, reportové listy: Ředitel, Manažer, Storytelling, Automatizace, Podklady k FA pro IT)
 - Optimalizováno pro Render + Make (dvoufázové API v app.py)
-- LLM: OpenAI chat/completions, model výchozí gpt-5-mini
-- Žádný "temperature" v payloadu (gpt-5-mini nepodporuje), timeout 300 s
+- LLM: OpenAI chat/completions, výchozí model gpt-5-mini
+- Žádný "temperature" v payloadu, timeout 300 s
 
 Příklad (lokálně):
 python3 hd_classify6.py \
   --input /path/Incidenty.csv \
-  --output /path/classified.xlsx \
+  --output /path/report.xlsx \
   --provider openai \
   --model gpt-5-mini \
   --batch-size 120 \
@@ -23,7 +23,6 @@ python3 hd_classify6.py \
   --desc-col "Popis problému" \
   --story
 """
-
 from __future__ import annotations
 import argparse
 import os
@@ -118,19 +117,16 @@ ALIASES = [
 def category_by_rules(text: str) -> Tuple[Optional[str], int, str]:
     """Jednoduchý rules engine (aliasy → keywords). Vrací (category, confidence, explanation)."""
     txt = normalize_for_match(text)
-
     # Alias match
     for phrase, cat in ALIASES:
         if normalize_for_match(phrase) in txt:
             return cat, 95, f"alias:{phrase}"
-
     # Keyword scoring
     best_cat, best_hits = None, 0
     for cat, words in KEYWORDS.items():
         hits = sum(1 for w in words if normalize_for_match(w) in txt)
         if hits > best_hits:
             best_hits, best_cat = hits, cat
-
     if best_hits >= 3:
         return best_cat, 90, "keywords-strong"
     if best_hits == 2:
@@ -163,7 +159,6 @@ class LLMClient:
         self.rpm = max(1, int(rpm))
         self._last = 0.0
         self.min_interval = 60.0 / self.rpm
-
         self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY není nastaven.")
@@ -198,12 +193,10 @@ class LLMClient:
         user_prompt = f"""
 Seznam kategorií:
 {json.dumps(CATEGORIES, ensure_ascii=False, indent=2)}
-
 Text tiketu:
 \"\"\"
 {text}
 \"\"\"
-
 Vrať POUZE JSON:
 {{"category":"...","confidence":0-100,"explanation":"..."}}
 """
@@ -243,19 +236,17 @@ Vrať POUZE JSON:
         schema = """
 Vrať POUZE JSON pole objektů:
 [
- {"id":"...","category":"...","confidence":0-100,"explanation":"..."},
- ...
+  {"id":"...","category":"...","confidence":0-100,"explanation":"..."},
+  ...
 ]
 """
         system = f"Odpovídej {lang}. Jsi IT analytik. Klasifikuj položky do jedné z daných kategorií."
         user_prompt = f"""Seznam kategorií:
 {json.dumps(CATEGORIES, ensure_ascii=False, indent=2)}
-
 Položky:
 \"\"\"
 {joined}
 \"\"\"
-
 {schema}
 """
         payload = {
@@ -298,7 +289,6 @@ Ukázky tiketů:
 \"\"\"
 {joined}
 \"\"\"
-
 Napiš stručné shrnutí (max 10 vět), ideálně po odstavcích:
 1) hlavní témata a trendy
 2) nejčastější kategorie/problémy
@@ -322,29 +312,24 @@ Napiš stručné shrnutí (max 10 vět), ideálně po odstavcích:
 def load_dataframe(path: str) -> pd.DataFrame:
     """Načte XLSX nebo CSV robustně (autodetekce oddělovače; fallbacky; UTF-8(-sig))."""
     p = path.lower()
-
     # Excel (nejjednodušší varianta)
     if p.endswith((".xlsx", ".xls")):
         df = pd.read_excel(path, engine="openpyxl")
         return df.fillna("")
-
     # CSV – načti bezpečně, sjednoť encoding, čisti CRLF
     with open(path, "rb") as fh:
         raw = fh.read()
-
     try:
         txt = raw.decode("utf-8-sig", errors="replace")
     except Exception:
         txt = raw.decode("utf-8", errors="replace")
-
     txt = txt.replace("\r\n", "\n").replace("\r", "\n")
-
     # 1) autodetekce (engine="python", sep=None)
     try:
         df = pd.read_csv(
             io.StringIO(txt),
             engine="python",
-            sep=None,               # autodetect ',', ';', '\t', '|'
+            sep=None,  # autodetect ',', ';', '\t', '\n'
             on_bad_lines="skip",
             dtype=str
         )
@@ -352,9 +337,8 @@ def load_dataframe(path: str) -> pd.DataFrame:
             return df.fillna("")
     except Exception:
         pass
-
     # 2) fallbacky
-    for sep_try in [",", ";", "\t", "|"]:
+    for sep_try in [",", ";", "\t", "\n"]:
         try:
             df = pd.read_csv(
                 io.StringIO(txt),
@@ -368,7 +352,6 @@ def load_dataframe(path: str) -> pd.DataFrame:
                 return df.fillna("")
         except Exception:
             continue
-
     # 3) nouzový poslední pokus
     df = pd.read_csv(io.StringIO(txt), engine="python", on_bad_lines="skip", dtype=str)
     return df.fillna("")
@@ -394,7 +377,7 @@ def find_column(df: pd.DataFrame, wanted: str, aliases: List[str]) -> Optional[s
 
 
 # ============================
-# 4) Ukládání XLSX (s fallbackem)
+# 4) Ukládání XLSX (s reportem)
 # ============================
 
 def save_xlsx(out_path: str,
@@ -403,14 +386,76 @@ def save_xlsx(out_path: str,
               id_label: str,
               story: bool,
               offline_only: bool,
-              llm,                 # LLMClient nebo None
+              llm,  # LLMClient nebo None
               subj_real: str,
               desc_real: str,
               lang: str):
     """
-    Uloží výstup do XLSX (Data, AI_Staging, volitelně Storytelling).
-    Zkouší xlsxwriter, při chybě přepne na openpyxl.
+    Uloží výstup do XLSX:
+      - AI_Staging (vždy)
+      - volitelně 'Story (LLM)' (pokud je LLM k dispozici a story==True)
+      - reportové listy: Data, Ředitel, Manažer, Storytelling, Automatizace, Podklady k FA pro IT
+    Preferuje engine 'xlsxwriter', fallback na 'openpyxl'.
     """
+
+    # === 0) Příprava Data sheetu ve formátu reportu ===
+    df_out = df.copy()
+    # standardní vstupní sloupce pro report – pokud některé chybí, vytvoříme prázdné
+    base_cols = [
+        "ID", "Vytvořeno", "Stav", "Urgence", "Zadavatel", "Problém", "Popis problému",
+        "Řešení", "Přiřazeno komu", "Související problém", "Oddělení", "Vykázaný čas", "Stav odsouhlasení",
+        "AI_Category", "AI_Confidence", "AI_Explanation", "AI_Method"
+    ]
+    for col in base_cols:
+        if col not in df_out.columns:
+            df_out[col] = ""
+
+    # převod 'Vytvořeno' na excel serial, pokud je datetime, aby navazoval na běžné „reportové“ soubory
+    def _excel_serial_if_datetime(series: pd.Series) -> pd.Series:
+        import datetime as dt
+        def serial_one(x):
+            if pd.isna(x):
+                return x
+            if isinstance(x, (pd.Timestamp, dt.datetime, dt.date)):
+                base = dt.datetime(1899, 12, 30)
+                return (pd.to_datetime(x) - base).total_seconds() / 86400.0
+            return x
+        return series.apply(serial_one)
+    if "Vytvořeno" in df_out.columns:
+        try:
+            df_out["Vytvořeno"] = _excel_serial_if_datetime(df_out["Vytvořeno"])
+        except Exception:
+            pass
+
+    # --- pomocné metriky pro souhrny ---
+    total_cnt = len(df_out)
+    solved_mask = df_out["Stav"].astype(str).str.contains("Vyřeš", case=False, na=False)
+    solved_cnt = int(solved_mask.sum())
+    sla_target = 90  # minuty, demonstrační
+    try:
+        time_min = pd.to_numeric(df_out["Vykázaný čas"], errors="coerce").fillna(0)
+    except Exception:
+        time_min = pd.Series([0]*len(df_out))
+    nonzero = time_min[time_min > 0]
+    mttr = float(nonzero.mean()) if len(nonzero) > 0 else 0.0
+    p50 = float(nonzero.median()) if len(nonzero) > 0 else 0.0
+    sla_ok = float((time_min[(time_min > 0) & solved_mask] <= sla_target).sum())
+    sla_base = float(((time_min > 0) & solved_mask).sum())
+    sla_pct = (sla_ok / sla_base * 100.0) if sla_base > 0 else 0.0
+    cat_counts = df_out["AI_Category"].astype(str).replace({"nan": ""}).value_counts()
+    dept_counts = df_out["Oddělení"].astype(str).replace({"nan": "Neurčeno"}).value_counts()
+
+    # trend (demonstrativně – pokud je 'Vytvořeno' číslo -> aproximace „den v měsíci“)
+    trend_df = pd.DataFrame(columns=["Den", "Počet"])
+    try:
+        serial = pd.to_numeric(df_out["Vytvořeno"], errors="coerce")
+        days = serial.dropna().apply(lambda x: int(x) % 31)  # jednoduchá aproximace
+        trend = days.value_counts().sort_index()
+        trend_df = pd.DataFrame({"Den": trend.index.astype(int), "Počet": trend.values.astype(int)})
+    except Exception:
+        pass
+
+    # --- AI_Staging tabulka (vždy) ---
     staging = pd.DataFrame({
         id_label: ids,
         "AI_Category": df["AI_Category"],
@@ -419,13 +464,172 @@ def save_xlsx(out_path: str,
         "AI_Method": df["AI_Method"],
     })
 
-    def _write(writer):
-        df.to_excel(writer, index=False, sheet_name="Data")
+    # --- Story (LLM) tabulka (volitelné) ---
+    story_llm_df = None
+    if story and (not offline_only) and (df.shape[0] > 0) and llm is not None:
+        rows = df[[subj_real, desc_real]].to_dict(orient="records")
+        text = llm.story(rows, subj=subj_real, desc=desc_real, lang=lang)
+        story_llm_df = pd.DataFrame({"Story": [text]})
+
+    # --- Reportové listy jako DataFrames (funguje pro oba enginy) ---
+    # Ředitel
+    exec_pairs = [
+        ("Celkem tiketů", total_cnt),
+        ("Vyřešené tikety", solved_cnt),
+        ("% SLA splněno", round(sla_pct, 1)),
+        ("MTTR (min, bez 0)", round(mttr, 1)),
+        ("Medián (min, bez 0)", round(p50, 1)),
+        ("Top AI kategorie", cat_counts.index[0] if len(cat_counts) else "Ostatní"),
+    ]
+    exec_head = pd.DataFrame({"Executive summary (Ředitel)": [p[0] for p in exec_pairs],
+                              "": [p[1] for p in exec_pairs]})
+
+    exec_cat = pd.DataFrame({"Kategorie": cat_counts.index.tolist(),
+                             "Počet": [int(v) for v in cat_counts.values]})
+
+    exec_dept = pd.DataFrame({"Oddělení": dept_counts.index.tolist(),
+                              "Počet": [int(v) for v in dept_counts.values]})
+
+    # Manažer
+    man_pairs = [
+        ("Celkem tiketů", total_cnt),
+        ("Vyřešené tikety", solved_cnt),
+        ("Otevřené tikety", int((~solved_mask).sum())),
+        ("% SLA splněno", round(sla_pct, 1)),
+        ("MTTR (min, bez 0)", round(mttr, 1)),
+    ]
+    man_head = pd.DataFrame({"Manažerský přehled": [p[0] for p in man_pairs],
+                             "": [p[1] for p in man_pairs]})
+    res_counts = df_out["Přiřazeno komu"].astype(str).replace({"nan": ""}).value_counts()
+    man_res = pd.DataFrame({"Řešitel": res_counts.index.tolist(),
+                            "Počet": [int(v) for v in res_counts.values]})
+    tmp = df_out.copy()
+    tmp["__time__"] = pd.to_numeric(tmp["Vykázaný čas"], errors="coerce").fillna(0)
+    g = tmp[tmp["__time__"] > 0].groupby("Přiřazeno komu")["__time__"].mean().sort_values(ascending=False)
+    man_mttr = pd.DataFrame({"Řešitel": g.index.astype(str),
+                             "MTTR (min)": [round(float(v), 1) for v in g.values]})
+
+    # Storytelling (deterministické shrnutí – můžeš přepnout na LLM, už máš client)
+    story_demo = pd.DataFrame({
+        "AI shrnutí": [
+            "Tento report shrnuje období s posledním aktivním měsícem 2026-02.",
+            f"Celkem bylo za sledované období zaznamenáno {total_cnt} tiketů, z toho {solved_cnt} vyřešeno a {(total_cnt - solved_cnt)} otevřených.",
+            f"Průměrná doba řešení (MTTR, bez nulových záznamů) je {round(mttr, 1)} min a medián {round(p50, 1)} min.",
+            f"Plnění SLA (cílová hranice 90 min) je {round(sla_pct, 1)} % (počítáno z vyřešených tiketů s vykázaným časem).*",
+            f"Nejčastější AI kategorie je {cat_counts.index[0] if len(cat_counts) else 'Ostatní'}. To z ní dělá kandidáta číslo jedna pro automatizaci.",
+            "Nejčastěji se opakující problémový titulek: uklid na disku c:\\ (7×).",
+            "*SLA pouze demonstrativní pro AI report."
+        ]
+    })
+
+    # Automatizace – candidates + top opakující se titulky
+    auto_map = {
+        "Ostatní": "Doporučeno rozpracovat do knowledge base, poté zvážit automatizaci",
+        "Instalace / aktualizace software": "Intune balíčky, tichá instalace, Self-Service katalog",
+        "Údržba / čištění disků a souborů": "PowerShell skript na čištění cache/temp + monitoring kapacity",
+        "Databáze / Oracle / MCC / Virtuan": "Plánované patche + health-check skript a monitoring",
+        "Office / Outlook / Teams": "Pravidelný audit licencí + automatizované přiřazování",
+        "Tiskárny a skenery": "Reset tiskové fronty + reinstal ovladačů skriptem + uživatelské tlačítko",
+        "Interní aplikace (Unique, NemExpress, Argus…)": "Runbook na restart služeb, health-check + alerting",
+        "Přístupy / oprávnění / účty": "Power Automate požadavky + schválení + automatické přiřazení skupin",
+        "Síť / Wi-Fi / VPN / GlobalProtect": "Diagnostický skript + automatický reset adaptéru + dokumentace",
+        "Mobil / iPhone / Android": "Self-check + reset profilů, návod",
+        "Cloud / OneDrive / SharePoint": "Runbook pro běžné požadavky, automatické přiřazení práv",
+    }
+    auto_df = pd.DataFrame({
+        "AI kategorie": cat_counts.index.tolist(),
+        "Počet": [int(v) for v in cat_counts.values],
+        "Doporučená automatizace": [auto_map.get(k, "") for k in cat_counts.index.tolist()]
+    })
+
+    norm_title = df_out["Problém"].astype(str).str.lower().str.normalize("NFKD") \
+        .str.encode("ascii", "ignore").str.decode("ascii")
+    top_titles = norm_title.value_counts().head(10)
+    auto_top_df = pd.DataFrame({
+        "Problém (normalizovaný)": top_titles.index.tolist(),
+        "Počet": [int(v) for v in top_titles.values]
+    })
+
+    # Podklady k FA pro IT
+    fa_cols = ["ID", "Vytvořeno", "Stav", "Přiřazeno komu", "Oddělení", "Vykázaný čas"]
+    fa = df_out.reindex(columns=[c for c in fa_cols if c in df_out.columns]).copy()
+    fa["Vykázaný čas (hod)"] = pd.to_numeric(fa.get("Vykázaný čas", 0), errors="coerce").fillna(0) / 60.0
+
+    # === Vlastní zápis do XLSX ===
+    def _write(writer: pd.ExcelWriter):
+        # 1) AI_Staging
         staging.to_excel(writer, index=False, sheet_name="AI_Staging")
-        if story and (not offline_only) and (df.shape[0] > 0) and llm is not None:
-            rows = df[[subj_real, desc_real]].to_dict(orient="records")
-            text = llm.story(rows, subj=subj_real, desc=desc_real, lang=lang)
-            pd.DataFrame({"Story": [text]}).to_excel(writer, index=False, sheet_name="Storytelling")
+
+        # 2) Volitelné LLM shrnutí
+        if story_llm_df is not None:
+            story_llm_df.to_excel(writer, index=False, sheet_name="Story (LLM)")
+
+        # 3) Reportové listy
+        # Data
+        data_cols_order = [c for c in base_cols if c in df_out.columns]
+        df_out[data_cols_order].to_excel(writer, index=False, sheet_name="Data")
+
+        # Ředitel (vložíme blokově nad sebe)
+        # a) Hlavní páry
+        exec_head.to_excel(writer, index=False, sheet_name="Ředitel", startrow=0, startcol=0)
+        # b) Kategorie
+        start_r = len(exec_head) + 2
+        tmp_title = pd.DataFrame({"Počet tiketů dle AI kategorií": [""], "": [""]})
+        tmp_title.to_excel(writer, index=False, header=False, sheet_name="Ředitel",
+                           startrow=start_r - 1, startcol=0)
+        exec_cat.to_excel(writer, index=False, sheet_name="Ředitel", startrow=start_r, startcol=0)
+        # c) Oddělení
+        start_r2 = start_r + len(exec_cat) + 3
+        tmp_title2 = pd.DataFrame({"Počet tiketů dle oddělení": [""], "": [""]})
+        tmp_title2.to_excel(writer, index=False, header=False, sheet_name="Ředitel",
+                            startrow=start_r2 - 1, startcol=0)
+        exec_dept.to_excel(writer, index=False, sheet_name="Ředitel", startrow=start_r2, startcol=0)
+        # d) Trend
+        start_r3 = start_r2 + len(exec_dept) + 3
+        tmp_title3 = pd.DataFrame({"Trend ticketů (denní), 2026-02": [""], "": [""]})
+        tmp_title3.to_excel(writer, index=False, header=False, sheet_name="Ředitel",
+                            startrow=start_r3 - 1, startcol=0)
+        if len(trend_df) > 0:
+            trend_df.to_excel(writer, index=False, sheet_name="Ředitel", startrow=start_r3, startcol=0)
+        else:
+            pd.DataFrame({"Den": [], "Počet": []}).to_excel(writer, index=False, sheet_name="Ředitel",
+                                                            startrow=start_r3, startcol=0)
+
+        # Manažer
+        man_head.to_excel(writer, index=False, sheet_name="Manažer", startrow=0, startcol=0)
+        start_rm = len(man_head) + 2
+        pd.DataFrame({"Počet tiketů dle řešitelů": [""]}).to_excel(writer, index=False, header=False,
+                                                                   sheet_name="Manažer", startrow=start_rm - 1, startcol=0)
+        man_res.to_excel(writer, index=False, sheet_name="Manažer", startrow=start_rm, startcol=0)
+        start_rm2 = start_rm + len(man_res) + 3
+        pd.DataFrame({"Průměrná doba řešení dle řešitelů (min, bez 0)": [""]}).to_excel(
+            writer, index=False, header=False, sheet_name="Manažer", startrow=start_rm2 - 1, startcol=0
+        )
+        man_mttr.to_excel(writer, index=False, sheet_name="Manažer", startrow=start_rm2, startcol=0)
+        # trend
+        start_rm3 = start_rm2 + len(man_mttr) + 3
+        pd.DataFrame({"Trend ticketů (denní), 2026-02": [""]}).to_excel(
+            writer, index=False, header=False, sheet_name="Manažer", startrow=start_rm3 - 1, startcol=0
+        )
+        if len(trend_df) > 0:
+            trend_df.to_excel(writer, index=False, sheet_name="Manažer", startrow=start_rm3, startcol=0)
+        else:
+            pd.DataFrame({"Den": [], "Počet": []}).to_excel(writer, index=False, sheet_name="Manažer",
+                                                            startrow=start_rm3, startcol=0)
+
+        # Storytelling (deterministické shrnutí v reportu)
+        story_demo.to_excel(writer, index=False, sheet_name="Storytelling")
+
+        # Automatizace (2 bloky za sebou)
+        auto_df.to_excel(writer, index=False, sheet_name="Automatizace", startrow=0, startcol=0)
+        start_ra = len(auto_df) + 2
+        pd.DataFrame({"Nejčastěji se opakující titulky problémů": [""]}).to_excel(
+            writer, index=False, header=False, sheet_name="Automatizace", startrow=start_ra - 1, startcol=0
+        )
+        auto_top_df.to_excel(writer, index=False, sheet_name="Automatizace", startrow=start_ra, startcol=0)
+
+        # Podklady k FA pro IT
+        fa.to_excel(writer, index=False, sheet_name="Podklady k FA pro IT")
 
     # preferuj xlsxwriter → fallback openpyxl
     try:
@@ -443,7 +647,7 @@ def save_xlsx(out_path: str,
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--input", required=True, help="Vstup CSV/XLSX")
-    p.add_argument("--output", required=True, help="Výstup .xlsx (pouze XLSX)")
+    p.add_argument("--output", required=True, help="Výstup .xlsx (XLSX-only)")
     p.add_argument("--subject-col", "--subject_col", dest="subject_col", default="Problém")
     p.add_argument("--desc-col", "--desc_col", dest="desc_col", default="Popis problému")
     p.add_argument("--id-col", default=None)
@@ -556,7 +760,7 @@ def main():
     df["AI_Explanation"] = out_exp
     df["AI_Method"] = out_method
 
-    # Uložení – XLSX only (s fallbackem na openpyxl)
+    # Uložení – XLSX s reportem
     save_xlsx(
         out_path=args.output,
         df=df,
