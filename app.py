@@ -83,7 +83,7 @@ async def generate(
     x_api_key_header1: Optional[str] = Header(None, alias="X-API-KEY"),
     x_api_key_header2: Optional[str] = Header(None, alias="X-API_KEY"),
 ):
-):
+
     # (volitelné) API klíč
     expected_key = REQUIRE_API_KEY
     provided_key = x_api_key_header1 or x_api_key_header2
