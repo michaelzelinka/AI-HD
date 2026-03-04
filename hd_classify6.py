@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 hd_classify6.py – Finální produkční verze (2026/03)
-- Rule-first + Batch LLM klasifikace
+
+Funkce:
+- Rule-first + Batch LLM klasifikace (minimalizace LLM volání)
 - Storytelling (CZ)
 - Robustní CSV loader (semicolon/diakritika/BOM/CRLF/multiline)
-- Výstup pouze XLSX (Data, AI_Staging, Storytelling)
+- Výstup pouze XLSX (Data, AI_Staging, volitelně Storytelling)
 - Optimalizováno pro Render + Make (dvoufázové API v app.py)
-- Model: gpt-5-mini (OpenAI), bez 'temperature', timeout 300 s
+- LLM: OpenAI chat/completions, model výchozí gpt-5-mini
+- Žádný "temperature" v payloadu (gpt-5-mini nepodporuje), timeout 300 s
 
-Použití (lokálně):
+Příklad (lokálně):
 python3 hd_classify6.py \
   --input /path/Incidenty.csv \
   --output /path/classified.xlsx \
@@ -35,11 +38,13 @@ from typing import List, Dict, Optional, Tuple
 import pandas as pd
 import requests
 
+
 # ============================
 # 0) Utility: text & safety
 # ============================
 
 def safe_text(x: str) -> str:
+    """Očistí text: BOM, CRLF→LF, kontrolní znaky, zhuštění whitespace."""
     if x is None:
         return ""
     x = str(x)
@@ -49,15 +54,19 @@ def safe_text(x: str) -> str:
     x = re.sub(r"\s+", " ", x)
     return x.strip()
 
+
 def normalize_text(s: str) -> str:
     return safe_text(s)
 
+
 def normalize_for_match(s: str) -> str:
+    """Lower + odstranění diakritiky + kompaktní mezery (pro robustní porovnávání)."""
     s = normalize_text(s).lower()
     s = "".join(ch for ch in unicodedata.normalize("NFKD", s)
                 if not unicodedata.combining(ch))
     s = re.sub(r"\s+", " ", s)
     return s
+
 
 # ============================
 # 1) Kategorie a rules-engine
@@ -105,16 +114,23 @@ ALIASES = [
     ("nelze tisknout", "Tiskárny a skenery"),
 ]
 
+
 def category_by_rules(text: str) -> Tuple[Optional[str], int, str]:
+    """Jednoduchý rules engine (aliasy → keywords). Vrací (category, confidence, explanation)."""
     txt = normalize_for_match(text)
+
+    # Alias match
     for phrase, cat in ALIASES:
         if normalize_for_match(phrase) in txt:
             return cat, 95, f"alias:{phrase}"
+
+    # Keyword scoring
     best_cat, best_hits = None, 0
     for cat, words in KEYWORDS.items():
         hits = sum(1 for w in words if normalize_for_match(w) in txt)
         if hits > best_hits:
             best_hits, best_cat = hits, cat
+
     if best_hits >= 3:
         return best_cat, 90, "keywords-strong"
     if best_hits == 2:
@@ -122,6 +138,7 @@ def category_by_rules(text: str) -> Tuple[Optional[str], int, str]:
     if best_hits == 1:
         return best_cat, 55, "keywords-weak"
     return None, 0, "no-match"
+
 
 def validate_category(cat: Optional[str]) -> str:
     if not cat:
@@ -135,6 +152,7 @@ def validate_category(cat: Optional[str]) -> str:
             return c
     return "Ostatní"
 
+
 # ============================
 # 2) LLM klient (OpenAI)
 # ============================
@@ -145,6 +163,7 @@ class LLMClient:
         self.rpm = max(1, int(rpm))
         self._last = 0.0
         self.min_interval = 60.0 / self.rpm
+
         self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY není nastaven.")
@@ -169,6 +188,7 @@ class LLMClient:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
         return r.json()
 
+    # Řádková klasifikace (pro completeness; primárně používáme batch)
     def classify(self, text: str, strict: bool = False, lang: str = "cs") -> Dict:
         system = (
             f"Odpovídej {lang}. Jsi zkušený IT analytik. Urči jednu kategorii z předem daného seznamu."
@@ -210,6 +230,7 @@ Vrať POUZE JSON:
             js["confidence"] = 0
         return js
 
+    # Batch klasifikace (doporučeno)
     def classify_batch(self, items: List[dict], lang: str = "cs") -> List[dict]:
         """
         items: [{"id":"...", "subject":"...", "desc":"..."}, ...]
@@ -265,6 +286,7 @@ Položky:
             out.append({"id": cid, "category": cat, "confidence": conf, "explanation": exp})
         return out
 
+    # Storytelling
     def story(self, rows: List[dict], subj: str, desc: str, lang="cs") -> str:
         samples = []
         for r in rows[:100]:
@@ -272,12 +294,12 @@ Položky:
         joined = "\n".join(samples[:60])
         system = f"Odpovídej {lang}. Jsi datový analytik IT helpdesku."
         user_prompt = f"""
-Ukázky tiketu:
+Ukázky tiketů:
 \"\"\"
 {joined}
 \"\"\"
 
-Napiš shrnutí (max 10 vět):
+Napiš stručné shrnutí (max 10 vět), ideálně po odstavcích:
 1) hlavní témata a trendy
 2) nejčastější kategorie/problémy
 3) doporučení (co změnit, automatizovat, školit)
@@ -292,22 +314,29 @@ Napiš shrnutí (max 10 vět):
         data = self._post(payload, timeout=300)
         return data["choices"][0]["message"]["content"].strip()
 
+
 # ============================
 # 3) I/O – robustní loader
 # ============================
 
 def load_dataframe(path: str) -> pd.DataFrame:
+    """Načte XLSX nebo CSV robustně (autodetekce oddělovače; fallbacky; UTF-8(-sig))."""
     p = path.lower()
+
+    # Excel (nejjednodušší varianta)
     if p.endswith((".xlsx", ".xls")):
         df = pd.read_excel(path, engine="openpyxl")
         return df.fillna("")
-    # CSV – načtení bezpečně s autodetekcí oddělovače + fallbacky
+
+    # CSV – načti bezpečně, sjednoť encoding, čisti CRLF
     with open(path, "rb") as fh:
         raw = fh.read()
+
     try:
         txt = raw.decode("utf-8-sig", errors="replace")
     except Exception:
         txt = raw.decode("utf-8", errors="replace")
+
     txt = txt.replace("\r\n", "\n").replace("\r", "\n")
 
     # 1) autodetekce (engine="python", sep=None)
@@ -344,6 +373,7 @@ def load_dataframe(path: str) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(txt), engine="python", on_bad_lines="skip", dtype=str)
     return df.fillna("")
 
+
 def normalize_name(s: str) -> str:
     s = safe_text(s)
     s = unicodedata.normalize("NFKD", s)
@@ -353,6 +383,7 @@ def normalize_name(s: str) -> str:
     s = s.replace('"', "").replace("'", "")
     return s
 
+
 def find_column(df: pd.DataFrame, wanted: str, aliases: List[str]) -> Optional[str]:
     norm_map = {normalize_name(c): c for c in df.columns}
     candidates = [normalize_name(wanted)] + [normalize_name(a) for a in aliases]
@@ -361,8 +392,52 @@ def find_column(df: pd.DataFrame, wanted: str, aliases: List[str]) -> Optional[s
             return norm_map[key]
     return None
 
+
 # ============================
-# 4) Argumenty
+# 4) Ukládání XLSX (s fallbackem)
+# ============================
+
+def save_xlsx(out_path: str,
+              df: pd.DataFrame,
+              ids: List[str],
+              id_label: str,
+              story: bool,
+              offline_only: bool,
+              llm,                 # LLMClient nebo None
+              subj_real: str,
+              desc_real: str,
+              lang: str):
+    """
+    Uloží výstup do XLSX (Data, AI_Staging, volitelně Storytelling).
+    Zkouší xlsxwriter, při chybě přepne na openpyxl.
+    """
+    staging = pd.DataFrame({
+        id_label: ids,
+        "AI_Category": df["AI_Category"],
+        "AI_Confidence": df["AI_Confidence"],
+        "AI_Explanation": df["AI_Explanation"],
+        "AI_Method": df["AI_Method"],
+    })
+
+    def _write(writer):
+        df.to_excel(writer, index=False, sheet_name="Data")
+        staging.to_excel(writer, index=False, sheet_name="AI_Staging")
+        if story and (not offline_only) and (df.shape[0] > 0) and llm is not None:
+            rows = df[[subj_real, desc_real]].to_dict(orient="records")
+            text = llm.story(rows, subj=subj_real, desc=desc_real, lang=lang)
+            pd.DataFrame({"Story": [text]}).to_excel(writer, index=False, sheet_name="Storytelling")
+
+    # preferuj xlsxwriter → fallback openpyxl
+    try:
+        with pd.ExcelWriter(out_path, engine="xlsxwriter") as writer:
+            _write(writer)
+    except ModuleNotFoundError:
+        with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+            _write(writer)
+
+
+# ============================
+# 5) Argumenty
 # ============================
 
 def parse_args():
@@ -383,12 +458,14 @@ def parse_args():
     p.add_argument("--offline-only", action="store_true")
     return p.parse_args()
 
+
 # ============================
-# 5) Hlavní běh
+# 6) Hlavní běh
 # ============================
 
 def main():
     args = parse_args()
+
     # Enforce .xlsx
     if not args.output.lower().endswith(".xlsx"):
         raise ValueError("Výstup musí být .xlsx (XLSX-only).")
@@ -479,45 +556,23 @@ def main():
     df["AI_Explanation"] = out_exp
     df["AI_Method"] = out_method
 
-# Uložení – XLSX only (s fallbackem na openpyxl, pokud xlsxwriter není v prostředí)
-try:
-    with pd.ExcelWriter(args.output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="Data")
-
-        staging = pd.DataFrame({
-            id_label: ids,
-            "AI_Category": out_cat,
-            "AI_Confidence": out_conf,
-            "AI_Explanation": out_exp,
-            "AI_Method": out_method,
-        })
-        staging.to_excel(writer, index=False, sheet_name="AI_Staging")
-
-        if args.story and (not args.offline_only) and (df.shape[0] > 0):
-            rows = df[[subj_real, desc_real]].to_dict(orient="records")
-            text = llm.story(rows, subj=subj_real, desc=desc_real, lang=args.lang)
-            pd.DataFrame({"Story": [text]}).to_excel(writer, index=False, sheet_name="Storytelling")
-except ModuleNotFoundError:
-    # Fallback na openpyxl
-    with pd.ExcelWriter(args.output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Data")
-
-        staging = pd.DataFrame({
-            id_label: ids,
-            "AI_Category": out_cat,
-            "AI_Confidence": out_conf,
-            "AI_Explanation": out_exp,
-            "AI_Method": out_method,
-        })
-        staging.to_excel(writer, index=False, sheet_name="AI_Staging")
-
-        if args.story and (not args.offline_only) and (df.shape[0] > 0):
-            rows = df[[subj_real, desc_real]].to_dict(orient="records")
-            text = llm.story(rows, subj=subj_real, desc=desc_real, lang=args.lang)
-            pd.DataFrame({"Story": [text]}).to_excel(writer, index=False, sheet_name="Storytelling")
+    # Uložení – XLSX only (s fallbackem na openpyxl)
+    save_xlsx(
+        out_path=args.output,
+        df=df,
+        ids=ids,
+        id_label=id_label,
+        story=args.story,
+        offline_only=args.offline_only,
+        llm=llm,
+        subj_real=subj_real,
+        desc_real=desc_real,
+        lang=args.lang
+    )
 
     print("=== HOTOVO: Výstup uložen jako XLSX ===")
     print(args.output)
+
 
 if __name__ == "__main__":
     main()
